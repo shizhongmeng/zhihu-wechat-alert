@@ -312,9 +312,7 @@ def push(config, item):
 
 
 def run(config_path):
-    config = load_json(config_path)
-    if not config:
-        raise FileNotFoundError(f"Config not found: {config_path}")
+    config = load_json(config_path, {})
     config = apply_env_overrides(config)
 
     state_path = Path(config.get("state_file", DEFAULT_STATE))
