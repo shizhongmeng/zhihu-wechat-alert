@@ -1,0 +1,49 @@
+name: Test WxPusher
+
+on:
+  workflow_dispatch:
+    inputs:
+      message:
+        description: "Message body"
+        required: false
+        default: "GitHub Actions cloud push test."
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send test message
+        env:
+          WXPUSHER_APP_TOKEN: ${{ secrets.WXPUSHER_APP_TOKEN }}
+          WXPUSHER_UIDS: ${{ secrets.WXPUSHER_UIDS }}
+          TEST_MESSAGE: ${{ inputs.message }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          app_token = os.environ["WXPUSHER_APP_TOKEN"]
+          uids = [uid.strip() for uid in os.environ["WXPUSHER_UIDS"].split(",") if uid.strip()]
+          message = os.environ.get("TEST_MESSAGE") or "GitHub Actions cloud push test."
+
+          payload = {
+              "appToken": app_token,
+              "summary": "Zhihu cloud test",
+              "content": f"<p>{message}</p>",
+              "contentType": 2,
+              "uids": uids,
+          }
+          req = urllib.request.Request(
+              "https://wxpusher.zjiecode.com/api/send/message",
+              data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+              headers={"Content-Type": "application/json; charset=utf-8"},
+              method="POST",
+          )
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              text = resp.read().decode("utf-8", errors="replace")
+          print(text)
+          result = json.loads(text)
+          if result.get("code") != 1000:
+              raise SystemExit(1)
+          PY
