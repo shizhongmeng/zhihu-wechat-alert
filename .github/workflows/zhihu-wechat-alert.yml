@@ -1,0 +1,48 @@
+name: Zhihu WeChat Alert
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: zhihu-wechat-alert
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Run monitor
+        env:
+          ZHIHU_USER_TOKEN: xiao-peng-61-47
+          ZHIHU_ROUTE: pins
+          PUSH_PROVIDER: wxpusher
+          TITLE_PREFIX: Zhihu
+          WXPUSHER_APP_TOKEN: ${{ secrets.WXPUSHER_APP_TOKEN }}
+          WXPUSHER_UIDS: ${{ secrets.WXPUSHER_UIDS }}
+          STATE_FILE: state.github.json
+        run: python monitor.py
+
+      - name: Commit state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state.github.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Update Zhihu alert state"
+            git push
+          else
+            echo "No state changes"
+          fi

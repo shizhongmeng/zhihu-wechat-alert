@@ -1,0 +1,18 @@
+{
+  "zhihu_user_token": "replace-with-zhihu-url-token",
+  "route": "activities",
+  "rsshub_base": "https://rsshub.app",
+  "provider": "pushplus",
+  "title_prefix": "知乎动态",
+  "send_latest_on_first_run": false,
+  "max_seen": 200,
+
+  "pushplus_token": "replace-with-pushplus-token",
+
+  "serverchan_sendkey": "replace-with-serverchan-sendkey",
+
+  "wxpusher_app_token": "replace-with-wxpusher-app-token",
+  "wxpusher_uids": [
+    "replace-with-wxpusher-uid"
+  ]
+}
