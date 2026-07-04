@@ -1,0 +1,16 @@
+name = "zhihu-wechat-alert"
+main = "src/index.js"
+compatibility_date = "2026-07-04"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[kv_namespaces]]
+binding = "ZHIHU_ALERT_KV"
+id = "1f5939c19145438b8ab952f1a1ad6611"
+
+[vars]
+ZHIHU_USER_TOKEN = "xiao-peng-61-47"
+TITLE_PREFIX = "Zhihu"
+SEND_LATEST_ON_FIRST_RUN = "false"
+MAX_SEEN = "200"
