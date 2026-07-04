@@ -38,7 +38,21 @@ async function runAndRespond(env) {
 async function run(env) {
   const token = required(env.ZHIHU_USER_TOKEN, "ZHIHU_USER_TOKEN");
   const stateKey = `zhihu:${token}:pins`;
+  const testKey = `test-once:${token}`;
   console.log("run start", stateKey);
+
+  const testMessage = await env.ZHIHU_ALERT_KV.get(testKey);
+  if (testMessage) {
+    await pushWxPusher(env, {
+      title: "Cloudflare scheduled test",
+      published: new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }),
+      summary: testMessage,
+      link: `https://www.zhihu.com/people/${token}`,
+    });
+    await env.ZHIHU_ALERT_KV.delete(testKey);
+    console.log("sent one-time scheduled test");
+  }
+
   const state = (await env.ZHIHU_ALERT_KV.get(stateKey, "json")) || {
     initialized: false,
     seenIds: [],
