@@ -22,6 +22,7 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
+    console.log("scheduled event", event.cron, new Date().toISOString());
     ctx.waitUntil(run(env));
   },
 };
@@ -37,12 +38,14 @@ async function runAndRespond(env) {
 async function run(env) {
   const token = required(env.ZHIHU_USER_TOKEN, "ZHIHU_USER_TOKEN");
   const stateKey = `zhihu:${token}:pins`;
+  console.log("run start", stateKey);
   const state = (await env.ZHIHU_ALERT_KV.get(stateKey, "json")) || {
     initialized: false,
     seenIds: [],
   };
 
   const items = await fetchPins(token);
+  console.log("fetched items", items.length);
   if (!items.length) {
     await saveState(env, stateKey, state, { lastCheckedAt: Date.now() });
     return { ok: true, pushed: 0, message: "No items found." };
@@ -54,11 +57,13 @@ async function run(env) {
       seenIds: items.slice(0, maxSeen(env)).map((item) => item.id),
       lastCheckedAt: Date.now(),
     });
+    console.log("initialized state", items.length);
     return { ok: true, pushed: 0, message: `Initialized ${items.length} item(s); no push sent.` };
   }
 
   const seen = new Set(state.seenIds || []);
   const newItems = items.filter((item) => !seen.has(item.id));
+  console.log("new items", newItems.length);
   if (!newItems.length) {
     await saveState(env, stateKey, state, { lastCheckedAt: Date.now() });
     return { ok: true, pushed: 0, message: "No new items." };
