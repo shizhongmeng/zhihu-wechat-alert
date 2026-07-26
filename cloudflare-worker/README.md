@@ -65,3 +65,10 @@ https://zhihu-wechat-alert.<your-subdomain>.workers.dev/health
 `/run` returns a per-target breakdown, so you can see which feed pushed and which failed.
 `/targets` lists the feeds the Worker parsed from your config without checking them.
 `/test` sends one test message per target, so two configured feeds mean two messages.
+It also returns WxPusher's per-recipient `delivery` rows, each with its own `code` and a
+`url` you can open to read the message on the web.
+
+Note that WxPusher dispatches asynchronously: `code: 1000` with
+`status: "创建发送任务成功"` means the send task was created, not that WeChat has shown
+the notification yet. The push can land a while after the response comes back, so give it
+a few minutes before treating a test as failed.

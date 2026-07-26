@@ -16,15 +16,23 @@ export default {
     if (url.pathname === "/test") {
       try {
         const targets = parseTargets(env);
+        const results = [];
         for (const target of targets) {
-          await pushWxPusher(env, target, {
+          const result = await pushWxPusher(env, target, {
             title: "Cloudflare test",
             published: new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }),
             summary: "Cloudflare Worker cloud push test.",
             link: profileUrl(target.token),
           });
+          // Surface the per-recipient rows: an overall code 1000 can still hide a
+          // dead UID, which is invisible if we only report "sent".
+          results.push({ target: targetLabel(target), delivery: result && result.data });
         }
-        return Response.json({ ok: true, message: `Test push sent for ${targets.length} target(s).` });
+        return Response.json({
+          ok: true,
+          message: `Test push sent for ${targets.length} target(s).`,
+          results,
+        });
       } catch (error) {
         return Response.json({ ok: false, error: errorMessage(error) }, { status: 500 });
       }
@@ -298,6 +306,20 @@ async function pushWxPusher(env, target, item) {
   const result = JSON.parse(text);
   if (result.code !== 1000) {
     throw new Error(`WxPusher error: ${text}`);
+  }
+
+  // A top-level 1000 only means WxPusher accepted the request. Each recipient row in
+  // `data` carries its own code, so a message can be "sent" and still reach nobody
+  // (unsubscribed UID, wrong UID). Check the rows before calling this a success.
+  const rows = Array.isArray(result.data) ? result.data : [];
+  const failed = rows.filter((row) => row && row.code !== undefined && row.code !== 1000);
+  if (rows.length && failed.length === rows.length) {
+    throw new Error(`WxPusher accepted the request but every recipient failed: ${text}`);
+  }
+  if (failed.length) {
+    // Partial failure: do not throw, or the working recipients would get a repeat on
+    // every retry. Log it so the bad UID is visible in `wrangler tail`.
+    console.log("wxpusher partial failure", targetLabel(target), JSON.stringify(failed));
   }
   return result;
 }
