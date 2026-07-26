@@ -1,8 +1,19 @@
 {
-  "zhihu_user_token": "replace-with-zhihu-url-token",
-  "route": "activities",
+  "targets": [
+    {
+      "zhihu_user_token": "xiao-peng-61-47",
+      "route": "pins",
+      "title_prefix": "知乎-小鹏"
+    },
+    {
+      "zhihu_user_token": "dashixiongmofan",
+      "route": "pins",
+      "title_prefix": "知乎-大师兄"
+    }
+  ],
+
   "rsshub_base": "https://rsshub.app",
-  "provider": "pushplus",
+  "provider": "wxpusher",
   "title_prefix": "知乎动态",
   "send_latest_on_first_run": false,
   "max_seen": 200,

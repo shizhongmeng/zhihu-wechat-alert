@@ -6,19 +6,35 @@ export default {
     if (url.pathname === "/run") {
       return runAndRespond(env);
     }
+    if (url.pathname === "/targets") {
+      try {
+        return Response.json({ ok: true, targets: parseTargets(env) });
+      } catch (error) {
+        return Response.json({ ok: false, error: errorMessage(error) }, { status: 500 });
+      }
+    }
     if (url.pathname === "/test") {
-      await pushWxPusher(env, {
-        title: "Cloudflare test",
-        published: new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }),
-        summary: "Cloudflare Worker cloud push test.",
-        link: `https://www.zhihu.com/people/${required(env.ZHIHU_USER_TOKEN, "ZHIHU_USER_TOKEN")}`,
-      });
-      return Response.json({ ok: true, message: "Test push sent." });
+      try {
+        const targets = parseTargets(env);
+        for (const target of targets) {
+          await pushWxPusher(env, target, {
+            title: "Cloudflare test",
+            published: new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }),
+            summary: "Cloudflare Worker cloud push test.",
+            link: profileUrl(target.token),
+          });
+        }
+        return Response.json({ ok: true, message: `Test push sent for ${targets.length} target(s).` });
+      } catch (error) {
+        return Response.json({ ok: false, error: errorMessage(error) }, { status: 500 });
+      }
     }
     if (url.pathname === "/health") {
       return Response.json({ ok: true, service: "zhihu-wechat-alert" });
     }
-    return new Response("ok\nGET /run to check now\nGET /test to push a test message\nGET /health for status\n");
+    return new Response(
+      "ok\nGET /run to check now\nGET /targets to list monitored feeds\nGET /test to push a test message\nGET /health for status\n",
+    );
   },
 
   async scheduled(event, env, ctx) {
@@ -31,69 +47,176 @@ async function runAndRespond(env) {
   try {
     return Response.json(await run(env));
   } catch (error) {
-    return Response.json({ ok: false, error: String(error && error.message ? error.message : error) }, { status: 500 });
+    return Response.json({ ok: false, error: errorMessage(error) }, { status: 500 });
   }
 }
 
-async function run(env) {
-  const token = required(env.ZHIHU_USER_TOKEN, "ZHIHU_USER_TOKEN");
-  const stateKey = `zhihu:${token}:pins`;
-  const testKey = `test-once:${token}`;
-  console.log("run start", stateKey);
+function parseTargets(env) {
+  const raw = (env.ZHIHU_TARGETS || "").trim();
+  let entries;
 
-  const testMessage = await env.ZHIHU_ALERT_KV.get(testKey);
-  if (testMessage) {
-    await pushWxPusher(env, {
-      title: "Cloudflare scheduled test",
-      published: new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }),
-      summary: testMessage,
-      link: `https://www.zhihu.com/people/${token}`,
-    });
-    await env.ZHIHU_ALERT_KV.delete(testKey);
-    console.log("sent one-time scheduled test");
+  if (raw) {
+    entries = raw.startsWith("[") ? JSON.parse(raw) : raw.split(",");
+  } else {
+    entries = [required(env.ZHIHU_USER_TOKEN, "ZHIHU_USER_TOKEN or ZHIHU_TARGETS")];
   }
 
-  const state = (await env.ZHIHU_ALERT_KV.get(stateKey, "json")) || {
-    initialized: false,
-    seenIds: [],
-  };
+  const targets = [];
+  const seen = new Set();
+  for (const entry of entries) {
+    const target = normalizeTarget(entry, env);
+    if (!target) continue;
+    const key = stateKey(target);
+    if (seen.has(key)) throw new Error(`Duplicate target: ${key}`);
+    seen.add(key);
+    targets.push(target);
+  }
 
-  const items = await fetchPins(token);
-  console.log("fetched items", items.length);
+  if (!targets.length) throw new Error("No Zhihu target configured.");
+  return targets;
+}
+
+function normalizeTarget(entry, env) {
+  let token = "";
+  let route = "pins";
+  let name = "";
+  let titlePrefix = "";
+
+  if (typeof entry === "string") {
+    const parts = entry.split(":").map((part) => part.trim());
+    token = parts[0] || "";
+    if (parts[1]) route = parts[1];
+    if (parts[2]) titlePrefix = parts[2];
+  } else if (entry && typeof entry === "object") {
+    token = String(entry.zhihu_user_token || entry.token || "").trim();
+    if (entry.route) route = String(entry.route).trim();
+    if (entry.name) name = String(entry.name);
+    if (entry.title_prefix || entry.titlePrefix) titlePrefix = String(entry.title_prefix || entry.titlePrefix);
+    if (entry.enabled === false) return null;
+  } else {
+    throw new Error("Each ZHIHU_TARGETS entry must be a string or an object.");
+  }
+
+  token = normalizeToken(token);
+  if (!token) throw new Error("A ZHIHU_TARGETS entry is missing its user token.");
+
+  return { token, route, name, titlePrefix: titlePrefix || env.TITLE_PREFIX || "Zhihu" };
+}
+
+function normalizeToken(value) {
+  let token = String(value || "").trim().replace(/\/+$/, "");
+  if (token.startsWith("http://") || token.startsWith("https://")) {
+    token = token.split("/").filter(Boolean).pop() || "";
+  }
+  return token;
+}
+
+function stateKey(target) {
+  return `zhihu:${target.token}:${target.route}`;
+}
+
+function targetLabel(target) {
+  return target.name || `${target.token}/${target.route}`;
+}
+
+function profileUrl(token) {
+  return `https://www.zhihu.com/people/${token}`;
+}
+
+async function run(env) {
+  const targets = parseTargets(env);
+  console.log("run start", targets.map(targetLabel).join(", "));
+
+  let pushed = 0;
+  const results = [];
+  const failures = [];
+
+  for (const target of targets) {
+    const label = targetLabel(target);
+    try {
+      const result = await checkTarget(env, target);
+      pushed += result.pushed;
+      results.push({ target: label, ...result });
+    } catch (error) {
+      // One failing feed must not stop the remaining targets.
+      const message = errorMessage(error);
+      failures.push(label);
+      results.push({ target: label, pushed: 0, error: message });
+      console.log("target failed", label, message);
+    }
+  }
+
+  return { ok: failures.length === 0, pushed, targets: results, failed: failures };
+}
+
+async function checkTarget(env, target) {
+  const key = stateKey(target);
+  const label = targetLabel(target);
+
+  // The Worker runtime has no XML parser, so RSSHub-backed routes stay on the Python runner.
+  // This is checked per target so one unsupported entry cannot stop the pins targets.
+  if (target.route !== "pins") {
+    throw new Error(
+      `Route "${target.route}" is not supported in the Worker (pins only). ` +
+        "Run this target with monitor.py / GitHub Actions instead.",
+    );
+  }
+
+  await sendPendingTestMessage(env, target);
+
+  const state = (await env.ZHIHU_ALERT_KV.get(key, "json")) || { initialized: false, seenIds: [] };
+  const items = await fetchPins(target.token);
+  console.log("fetched items", label, items.length);
+
   if (!items.length) {
-    await saveState(env, stateKey, state, { lastCheckedAt: Date.now() });
-    return { ok: true, pushed: 0, message: "No items found." };
+    await saveState(env, key, state, { lastCheckedAt: Date.now() });
+    return { pushed: 0, message: "No items found." };
   }
 
   if (!state.initialized && env.SEND_LATEST_ON_FIRST_RUN !== "true") {
-    await saveState(env, stateKey, {
+    await saveState(env, key, {
       initialized: true,
       seenIds: items.slice(0, maxSeen(env)).map((item) => item.id),
       lastCheckedAt: Date.now(),
     });
-    console.log("initialized state", items.length);
-    return { ok: true, pushed: 0, message: `Initialized ${items.length} item(s); no push sent.` };
+    console.log("initialized state", label, items.length);
+    return { pushed: 0, message: `Initialized ${items.length} item(s); no push sent.` };
   }
 
   const seen = new Set(state.seenIds || []);
   const newItems = items.filter((item) => !seen.has(item.id));
-  console.log("new items", newItems.length);
+  console.log("new items", label, newItems.length);
   if (!newItems.length) {
-    await saveState(env, stateKey, state, { lastCheckedAt: Date.now() });
-    return { ok: true, pushed: 0, message: "No new items." };
+    await saveState(env, key, state, { lastCheckedAt: Date.now() });
+    return { pushed: 0, message: "No new items." };
   }
 
+  let seenIds = state.seenIds || [];
+  let pushed = 0;
   for (const item of newItems.slice().reverse()) {
-    await pushWxPusher(env, item);
+    await pushWxPusher(env, target, item);
+    // Record each id right after its push so a later failure cannot cause a repeat.
+    seenIds = [item.id, ...seenIds].slice(0, maxSeen(env));
+    pushed += 1;
+    await saveState(env, key, { initialized: true, seenIds, lastCheckedAt: Date.now() });
   }
 
-  await saveState(env, stateKey, {
-    initialized: true,
-    seenIds: [...newItems.map((item) => item.id), ...(state.seenIds || [])].slice(0, maxSeen(env)),
-    lastCheckedAt: Date.now(),
-  });
+  return { pushed };
+}
 
-  return { ok: true, pushed: newItems.length };
+async function sendPendingTestMessage(env, target) {
+  const testKey = `test-once:${target.token}`;
+  const testMessage = await env.ZHIHU_ALERT_KV.get(testKey);
+  if (!testMessage) return;
+
+  await pushWxPusher(env, target, {
+    title: "Cloudflare scheduled test",
+    published: new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }),
+    summary: testMessage,
+    link: profileUrl(target.token),
+  });
+  await env.ZHIHU_ALERT_KV.delete(testKey);
+  console.log("sent one-time scheduled test", targetLabel(target));
 }
 
 async function fetchPins(token) {
@@ -101,7 +224,7 @@ async function fetchPins(token) {
   const response = await fetch(apiUrl, {
     headers: {
       "Accept": "application/json, text/plain, */*",
-      "Referer": `https://www.zhihu.com/people/${token}`,
+      "Referer": profileUrl(token),
       "User-Agent": "Mozilla/5.0 (compatible; zhihu-wechat-alert/1.0)",
     },
   });
@@ -143,10 +266,10 @@ function extractPinText(content) {
     .trim();
 }
 
-async function pushWxPusher(env, item) {
+async function pushWxPusher(env, target, item) {
   const appToken = required(env.WXPUSHER_APP_TOKEN, "WXPUSHER_APP_TOKEN");
   const uids = parseUids(required(env.WXPUSHER_UIDS, "WXPUSHER_UIDS"));
-  const titlePrefix = env.TITLE_PREFIX || "Zhihu";
+  const titlePrefix = target.titlePrefix || env.TITLE_PREFIX || "Zhihu";
 
   const payload = {
     appToken,
@@ -156,6 +279,7 @@ async function pushWxPusher(env, item) {
       `<p>${escapeHtml(item.published || "")}</p>`,
       `<p>${escapeHtml(item.summary || "")}</p>`,
       `<p><a href="${escapeHtml(item.link || "")}">Open Zhihu</a></p>`,
+      `<p>From: <a href="${escapeHtml(profileUrl(target.token))}">${escapeHtml(targetLabel(target))}</a></p>`,
     ].join(""),
     contentType: 2,
     uids,
@@ -196,6 +320,10 @@ function maxSeen(env) {
 function required(value, name) {
   if (!value) throw new Error(`${name} is required.`);
   return value;
+}
+
+function errorMessage(error) {
+  return String(error && error.message ? error.message : error);
 }
 
 function escapeHtml(value) {

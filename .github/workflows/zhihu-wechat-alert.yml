@@ -26,8 +26,9 @@ jobs:
 
       - name: Run monitor
         env:
-          ZHIHU_USER_TOKEN: xiao-peng-61-47
-          ZHIHU_ROUTE: pins
+          # Feeds to watch: "token:route:titlePrefix", comma separated.
+          # The repository variable ZHIHU_TARGETS overrides this default when set.
+          ZHIHU_TARGETS: ${{ vars.ZHIHU_TARGETS || 'xiao-peng-61-47:pins:Zhihu-xiaopeng,dashixiongmofan:pins:Zhihu-dashixiong' }}
           PUSH_PROVIDER: wxpusher
           TITLE_PREFIX: Zhihu
           WXPUSHER_APP_TOKEN: ${{ secrets.WXPUSHER_APP_TOKEN }}

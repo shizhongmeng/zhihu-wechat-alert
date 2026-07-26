@@ -16,12 +16,44 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = SCRIPT_DIR / "config.json"
 DEFAULT_STATE = SCRIPT_DIR / "state.json"
+VALID_ROUTES = {"activities", "answers", "posts", "pins"}
 
 
 def load_json(path, default=None):
     if not path.exists():
         return default
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def save_json(path, data):
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def log(message):
+    text = str(message)
+    encoding = sys.stdout.encoding or "utf-8"
+    print(text.encode(encoding, errors="backslashreplace").decode(encoding, errors="replace"))
+
+
+def parse_targets_env(value):
+    """Parse ZHIHU_TARGETS: either a JSON array, or "token:route:title,token2:route2"."""
+    value = value.strip()
+    if value.startswith("["):
+        return json.loads(value)
+
+    targets = []
+    for entry in value.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = [part.strip() for part in entry.split(":")]
+        target = {"zhihu_user_token": parts[0]}
+        if len(parts) > 1 and parts[1]:
+            target["route"] = parts[1]
+        if len(parts) > 2 and parts[2]:
+            target["title_prefix"] = parts[2]
+        targets.append(target)
+    return targets
 
 
 def apply_env_overrides(config):
@@ -40,6 +72,10 @@ def apply_env_overrides(config):
         if value:
             config[key] = value
 
+    targets_env = os.environ.get("ZHIHU_TARGETS")
+    if targets_env and targets_env.strip():
+        config["targets"] = parse_targets_env(targets_env)
+
     wxpusher_uids = os.environ.get("WXPUSHER_UIDS")
     if wxpusher_uids:
         config["wxpusher_uids"] = [item.strip() for item in wxpusher_uids.split(",") if item.strip()]
@@ -57,16 +93,6 @@ def apply_env_overrides(config):
         config["state_file"] = state_file
 
     return config
-
-
-def save_json(path, data):
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def log(message):
-    text = str(message)
-    encoding = sys.stdout.encoding or "utf-8"
-    print(text.encode(encoding, errors="backslashreplace").decode(encoding, errors="replace"))
 
 
 def http_request(url, method="GET", data=None, headers=None, timeout=30):
@@ -116,12 +142,16 @@ def parse_feed(xml_text):
         link = text_of(item, "link")
         guid = text_of(item, "guid") or link or title
         published = text_of(item, "pubDate")
+        summary = text_of(item, "description")
+        if len(summary) > 500:
+            summary = summary[:500] + "..."
         items.append(
             {
                 "id": guid,
                 "title": title,
                 "link": link,
                 "published": published,
+                "summary": summary,
             }
         )
 
@@ -135,12 +165,16 @@ def parse_feed(xml_text):
         link = attr_or_text(entry, "atom:link", "href")
         guid = text_of(entry, "atom:id") or link or title
         published = text_of(entry, "atom:updated") or text_of(entry, "atom:published")
+        summary = text_of(entry, "atom:summary")
+        if len(summary) > 500:
+            summary = summary[:500] + "..."
         items.append(
             {
                 "id": guid,
                 "title": title or "知乎新动态",
                 "link": link,
                 "published": published,
+                "summary": summary,
             }
         )
 
@@ -205,25 +239,83 @@ def normalize_zhihu_token(value):
     return token
 
 
-def build_feed_url(config):
-    token = normalize_zhihu_token(config["zhihu_user_token"])
-
-    route = config.get("route", "activities").strip("/")
-    if route not in {"activities", "answers", "posts", "pins"}:
-        raise ValueError("route must be one of: activities, answers, posts, pins")
-    if route == "pins":
-        return f"https://www.zhihu.com/api/v4/members/{urllib.parse.quote(token)}/pins?limit=10&offset=0"
-
-    base = config.get("rsshub_base", "https://rsshub.app").rstrip("/")
-    return f"{base}/zhihu/people/{route}/{urllib.parse.quote(token)}"
+def target_key(target):
+    """Stable state key for one monitored feed."""
+    return target.get("name") or f"{target['zhihu_user_token']}:{target['route']}"
 
 
-def fetch_items(config):
-    route = config.get("route", "activities").strip("/")
-    url = build_feed_url(config)
+def normalize_target(entry, config, index):
+    """Turn one raw target entry into a validated target dict."""
+    if isinstance(entry, str):
+        entry = {"zhihu_user_token": entry}
+    if not isinstance(entry, dict):
+        raise ValueError(f"targets[{index}] must be a string or an object")
 
-    if route == "pins":
-        token = normalize_zhihu_token(config["zhihu_user_token"])
+    raw_token = entry.get("zhihu_user_token") or entry.get("token") or ""
+    token = normalize_zhihu_token(str(raw_token))
+    if not token:
+        raise ValueError(f"targets[{index}] is missing zhihu_user_token")
+
+    route = str(entry.get("route") or config.get("route") or "activities").strip("/")
+    if route not in VALID_ROUTES:
+        raise ValueError(
+            f"targets[{index}] route must be one of: " + ", ".join(sorted(VALID_ROUTES))
+        )
+
+    target = {
+        "zhihu_user_token": token,
+        "route": route,
+        "rsshub_base": entry.get("rsshub_base") or config.get("rsshub_base") or "https://rsshub.app",
+    }
+    if entry.get("name"):
+        target["name"] = str(entry["name"])
+    if entry.get("title_prefix"):
+        target["title_prefix"] = str(entry["title_prefix"])
+    if entry.get("enabled") is False:
+        target["enabled"] = False
+    return target
+
+
+def normalize_targets(config):
+    """Build the target list, accepting both the new `targets` list and the old single-target keys."""
+    raw_targets = config.get("targets")
+    if raw_targets is None and config.get("zhihu_user_token"):
+        raw_targets = [{"zhihu_user_token": config["zhihu_user_token"]}]
+    if not raw_targets:
+        raise ValueError("no target configured: set `targets` (or `zhihu_user_token`) in config.json")
+    if not isinstance(raw_targets, list):
+        raise ValueError("`targets` must be a list")
+
+    targets = []
+    seen_keys = set()
+    for index, entry in enumerate(raw_targets):
+        target = normalize_target(entry, config, index)
+        key = target_key(target)
+        if key in seen_keys:
+            raise ValueError(f"duplicate target: {key}")
+        seen_keys.add(key)
+        targets.append(target)
+    return targets
+
+
+def target_label(target):
+    return f"{target['zhihu_user_token']}/{target['route']}"
+
+
+def build_feed_url(target):
+    token = urllib.parse.quote(target["zhihu_user_token"])
+    if target["route"] == "pins":
+        return f"https://www.zhihu.com/api/v4/members/{token}/pins?limit=10&offset=0"
+
+    base = target["rsshub_base"].rstrip("/")
+    return f"{base}/zhihu/people/{target['route']}/{token}"
+
+
+def fetch_items(target):
+    url = build_feed_url(target)
+
+    if target["route"] == "pins":
+        token = target["zhihu_user_token"]
         payload = http_json(
             url,
             headers={
@@ -235,7 +327,6 @@ def fetch_items(config):
 
     xml_text = http_request(url)
     return url, parse_feed(xml_text)
-
 
 def push_plus(config, title, content):
     token = config.get("pushplus_token", "")
@@ -289,16 +380,19 @@ def push_wxpusher(config, title, content):
     return http_request("https://wxpusher.zjiecode.com/api/send/message", method="POST", data=payload)
 
 
-def push(config, item):
-    title_prefix = config.get("title_prefix", "知乎动态")
+def push(config, target, item):
+    title_prefix = target.get("title_prefix") or config.get("title_prefix") or "知乎动态"
     title = f"{title_prefix}: {item['title']}"
     link = item.get("link") or ""
     published = item.get("published") or ""
+    source = target.get("name") or target_label(target)
+    profile = f"https://www.zhihu.com/people/{target['zhihu_user_token']}"
     content = (
         f"<p><b>{html.escape(item['title'])}</b></p>"
         f"<p>{html.escape(published)}</p>"
         f"<p>{html.escape(item.get('summary', ''))}</p>"
         f"<p><a href=\"{html.escape(link)}\">打开知乎</a></p>"
+        f"<p>来源: <a href=\"{html.escape(profile)}\">{html.escape(source)}</a></p>"
     )
 
     provider = config.get("provider", "pushplus").lower()
@@ -311,62 +405,133 @@ def push(config, item):
     raise ValueError("provider must be one of: pushplus, serverchan, wxpusher")
 
 
-def run(config_path):
+def migrate_state(state, targets):
+    """Upgrade a flat single-target state file to the per-target layout."""
+    if not isinstance(state, dict):
+        return {"version": 2, "targets": {}}
+    if isinstance(state.get("targets"), dict):
+        state.setdefault("version", 2)
+        return state
+
+    legacy_ids = state.get("seen_ids")
+    migrated = {"version": 2, "targets": {}}
+    if not legacy_ids and not state.get("initialized"):
+        return migrated
+
+    # Attach the old record to the target whose feed URL it came from.
+    legacy_feed = state.get("feed_url") or ""
+    owner = next((t for t in targets if build_feed_url(t) == legacy_feed), None) or (
+        targets[0] if targets else None
+    )
+    if owner is not None:
+        migrated["targets"][target_key(owner)] = {
+            "seen_ids": list(legacy_ids or []),
+            "initialized": bool(state.get("initialized")),
+            "feed_url": legacy_feed or build_feed_url(owner),
+            "last_checked_at": state.get("last_checked_at"),
+        }
+        log(f"Migrated legacy state to target: {target_label(owner)}")
+    return migrated
+
+
+def check_target(config, target, target_state):
+    """Fetch one target and push its new items. Returns the number pushed."""
+    label = target_label(target)
+    max_seen = int(config.get("max_seen", 200))
+    feed_url, items = fetch_items(target)
+    target_state["feed_url"] = feed_url
+    target_state["last_checked_at"] = int(time.time())
+
+    if not items:
+        log(f"[{label}] No items found in feed: {feed_url}")
+        return 0
+
+    if not target_state.get("initialized") and not config.get("send_latest_on_first_run", False):
+        target_state["seen_ids"] = [item["id"] for item in items[:max_seen]]
+        target_state["initialized"] = True
+        log(f"[{label}] Initialized {len(target_state['seen_ids'])} existing item(s); no push sent.")
+        log(f"[{label}] Feed: {feed_url}")
+        return 0
+
+    seen_ids = set(target_state.get("seen_ids", []))
+    new_items = [item for item in items if item["id"] not in seen_ids]
+    if not new_items:
+        log(f"[{label}] No new items.")
+        return 0
+
+    pushed = 0
+    for item in reversed(new_items):
+        log(f"[{label}] Pushing: {item['title']}")
+        log(push(config, target, item))
+        # Record each id right after its push so a later failure cannot cause a repeat.
+        target_state["seen_ids"] = [item["id"]] + target_state.get("seen_ids", [])
+        target_state["seen_ids"] = target_state["seen_ids"][:max_seen]
+        pushed += 1
+
+    target_state["initialized"] = True
+    log(f"[{label}] Pushed {pushed} new item(s).")
+    return pushed
+
+
+def run(config_path, only_target=None):
     config = load_json(config_path, {})
     config = apply_env_overrides(config)
+    targets = normalize_targets(config)
+
+    if only_target:
+        wanted = only_target.strip()
+        targets = [
+            t for t in targets
+            if wanted in {target_key(t), target_label(t), t.get("name"), t["zhihu_user_token"]}
+        ]
+        if not targets:
+            raise ValueError(f"no target matches --target {only_target}")
 
     state_path = Path(config.get("state_file", DEFAULT_STATE))
     if not state_path.is_absolute():
         state_path = SCRIPT_DIR / state_path
 
-    feed_url, items = fetch_items(config)
-    if not items:
-        log(f"No items found in feed: {feed_url}")
-        return 0
+    state = migrate_state(load_json(state_path, {}), targets)
 
-    state = load_json(state_path, {"seen_ids": [], "initialized": False})
-    seen_ids = set(state.get("seen_ids", []))
-    max_seen = int(config.get("max_seen", 200))
+    total_pushed = 0
+    failures = []
+    for target in targets:
+        label = target_label(target)
+        if target.get("enabled") is False:
+            log(f"[{label}] Skipped (disabled).")
+            continue
 
-    if not state.get("initialized") and not config.get("send_latest_on_first_run", False):
-        state["seen_ids"] = [item["id"] for item in items[:max_seen]]
-        state["initialized"] = True
-        state["feed_url"] = feed_url
-        state["last_checked_at"] = int(time.time())
-        save_json(state_path, state)
-        log(f"Initialized {len(state['seen_ids'])} existing item(s); no push sent.")
-        log(f"Feed: {feed_url}")
-        return 0
+        key = target_key(target)
+        target_state = state["targets"].setdefault(key, {"seen_ids": [], "initialized": False})
+        try:
+            total_pushed += check_target(config, target, target_state)
+        except Exception as exc:
+            # One broken feed must not stop the remaining targets.
+            failures.append(label)
+            log(f"[{label}] Error: {exc}")
+        finally:
+            # Persist after every target so a later crash cannot lose earlier progress.
+            save_json(state_path, state)
 
-    new_items = [item for item in items if item["id"] not in seen_ids]
-    if not new_items:
-        state["last_checked_at"] = int(time.time())
-        state["feed_url"] = feed_url
-        save_json(state_path, state)
-        log("No new items.")
-        return 0
-
-    for item in reversed(new_items):
-        log(f"Pushing: {item['title']}")
-        log(push(config, item))
-
-    updated_ids = [item["id"] for item in new_items] + state.get("seen_ids", [])
-    state["seen_ids"] = updated_ids[:max_seen]
-    state["initialized"] = True
-    state["feed_url"] = feed_url
-    state["last_checked_at"] = int(time.time())
-    save_json(state_path, state)
-    log(f"Pushed {len(new_items)} new item(s).")
+    log(f"Checked {len(targets)} target(s); pushed {total_pushed} item(s).")
+    if failures:
+        print(f"Failed target(s): {', '.join(failures)}", file=sys.stderr)
+        return 3
     return 0
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Push one Zhihu user's RSSHub updates to WeChat.")
+    parser = argparse.ArgumentParser(description="Push Zhihu users' updates to WeChat.")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to config.json")
+    parser.add_argument(
+        "--target",
+        default=None,
+        help="Only check one target, by name, token, or token/route",
+    )
     args = parser.parse_args()
 
     try:
-        return run(Path(args.config).resolve())
+        return run(Path(args.config).resolve(), args.target)
     except (urllib.error.URLError, urllib.error.HTTPError) as exc:
         print(f"Network error: {exc}", file=sys.stderr)
         return 2
