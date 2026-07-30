@@ -12,7 +12,7 @@ id = "1f5939c19145438b8ab952f1a1ad6611"
 [vars]
 # One or more feeds, comma separated: "token:route:titlePrefix".
 # route must be "pins" in the Worker; use monitor.py for activities/answers/posts.
-ZHIHU_TARGETS = "xiao-peng-61-47:pins:Zhihu-xiaopeng,dashixiongmofan:pins:Zhihu-dashixiong"
+ZHIHU_TARGETS = "xiao-peng-61-47:pins:Zhihu-xiaopeng"
 # Fallback used only when ZHIHU_TARGETS is empty.
 ZHIHU_USER_TOKEN = "xiao-peng-61-47"
 TITLE_PREFIX = "Zhihu"

@@ -166,7 +166,7 @@ async function checkTarget(env, target) {
   if (target.route !== "pins") {
     throw new Error(
       `Route "${target.route}" is not supported in the Worker (pins only). ` +
-        "Run this target with monitor.py / GitHub Actions instead.",
+        "Run this target with monitor.py instead.",
     );
   }
 

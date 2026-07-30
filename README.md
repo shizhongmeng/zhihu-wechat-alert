@@ -37,7 +37,7 @@ Each entry in `targets` takes:
 }
 ```
 
-Those two feeds are what `config.example.json`, the GitHub Actions workflow, and `wrangler.toml` ship with.
+`config.example.json` above shows the two-feed form. `wrangler.toml` currently ships with `xiao-peng-61-47:pins` only.
 
 The same person's different feeds count as different targets, so watching both their pins and their answers is two entries with the same token and different routes.
 
@@ -59,7 +59,7 @@ The old single-target format is still accepted:
 { "zhihu_user_token": "abc-123", "route": "pins" }
 ```
 
-An existing `state.json` / `state.github.json` in the old flat format is upgraded automatically on the next run, and its history is kept.
+An existing `state.json` in the old flat format is upgraded automatically on the next run, and its history is kept.
 
 ## 2. Test once
 
@@ -112,7 +112,7 @@ python .\monitor.py --target ghi-789
 
 ## Environment overrides
 
-Every config key can be overridden by an environment variable, which is how the GitHub Actions and Worker deployments are configured. `ZHIHU_TARGETS` sets the whole target list, either as a JSON array or in the compact `token:route:title` form, comma separated:
+Every config key can be overridden by an environment variable, which is how the Cloudflare Worker deployment is configured. `ZHIHU_TARGETS` sets the whole target list, either as a JSON array or in the compact `token:route:title` form, comma separated:
 
 ```text
 ZHIHU_TARGETS=abc-123:pins:知乎-小明,def-456:activities:知乎-小红
